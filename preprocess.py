@@ -1,9 +1,5 @@
 """Download and pre-process SQuAD and GloVe.
 
-Usage:
-    > source activate squad
-    > python setup.py
-
 Pre-processing code adapted from:
     > https://github.com/HKUST-KnowComp/R-Net/blob/master/prepro.py
     > https://github.com/chrischute/squad/blob/master/setup.py
@@ -26,7 +22,7 @@ from tqdm import tqdm
 
 def parse_args():
     """Arguments needed to setup preprocessing"""
-    parser = argparse.ArgumentParser('Download and pre-process SQuAD')
+    parser = argparse.ArgumentParser('Pre-process SQuAD')
 
     parser.add_argument('--train_record_file',
                         type=str,
