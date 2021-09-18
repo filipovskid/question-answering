@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import masked_softmax
+
 
 class InitializedConv1d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=1, relu=False, stride=1, padding=0, groups=1, bias=False):
@@ -45,9 +47,9 @@ class Embedding(nn.Module):
 
     def forward(self, word_idxs, char_idxs):
         """Parameters:
-            word_idxs: torch.Tensor of size (batch_size, num_words). Indices of words in context/question.
+            word_idxs: torch.Tensor of size (batch_size, num_words). Indices of words in context/query.
             char_idxs: torch.Tensor of size (batch_size, num_words, max_word_len). Indices of characters
-                       in context/question.
+                       in context/query.
 
             :returns torch.Tensor of size (batch_size, 96, num_words).
         """
@@ -298,3 +300,60 @@ class FeedForward(nn.Module):
         x = self.linear_conv(x)
 
         return x
+
+
+class ContextQueryAttention(nn.Module):
+
+    def __init__(self, hidden_size=96):
+        super(ContextQueryAttention, self).__init__()
+
+        self.context_weights = nn.Parameter(torch.empty(hidden_size, 1))
+        self.query_weights = nn.Parameter(torch.empty(hidden_size, 1))
+        self.cq_weights = nn.Parameter(torch.empty(1, 1, hidden_size))
+        for weight in (self.context_weights, self.query_weights, self.cq_weights):
+            nn.init.xavier_uniform_(weight)
+        self.bias = nn.Parameter(torch.zeros(1))
+
+    def forward(self, c, q, c_mask, q_mask):
+        """
+        Parameters
+            c: torch.Tensor of size (batch_size, hidden_size, c_len[num_words])
+            q: torch.Tensor of size (batch_size, hidden_size, q_len[num_words])
+            c_mask: torch.Tensor of size (batch_size, c_len[num_words])
+            q_mask: torch.Tensor of size (batch_size, q_len[num_words])
+
+            :returns: torch.Tensor of size (batch_size, c_len[num_words], 4 * hidden_size)
+        """
+        print('c:', c.size())
+        print('q:', q.size())
+        print('c_mask:', c_mask.size())
+        print('q_mask:', q_mask.size())
+
+        c, q = c.transpose(1, 2), q.transpose(1, 2)
+        batch_size, c_len, q_len = c.size()[0], c.size()[1], q.size()[1]
+        S = self.compute_similarity_matrix(c, q)
+
+        c_mask = c_mask.view(batch_size, c_len, 1)
+        q_mask = q_mask.view(batch_size, 1, q_len)
+        s1 = masked_softmax(S, q_mask, dim=2)
+        s2 = masked_softmax(S, c_mask, dim=1)
+
+        a = torch.bmm(s1, q)
+        b = torch.bmm(torch.bmm(s1, s2.transpose(1, 2)), c)
+        x = torch.cat([c, a, c * a, c * b], dim=2)
+
+        print('x:', x.size())
+        return x
+
+    def compute_similarity_matrix(self, c, q):
+        c_len, q_len = c.size(1), q.size(1)
+        c = F.dropout(c, p=0.1, training=self.training)
+        q = F.dropout(q, p=0.1, training=self.training)
+
+        s0 = torch.matmul(c, self.context_weights).expand([-1, -1, q_len])
+        s1 = torch.matmul(q, self.query_weights).transpose(1, 2).expand([-1, c_len, -1])
+        s2 = torch.matmul(c * self.cq_weights, q.transpose(1, 2))
+        s = s0 + s1 + s2 + self.bias
+
+        return s
+
