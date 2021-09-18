@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,7 +17,7 @@ class InitializedConv1d(nn.Module):
             nn.init.xavier_uniform_(self.out.weight)
 
     def forward(self, x):
-        if self.relu == True:
+        if self.relu:
             return F.relu(self.out(x))
         else:
             return self.out(x)
@@ -48,7 +49,7 @@ class Embedding(nn.Module):
             char_idxs: torch.Tensor of size (batch_size, num_words, max_word_len). Indices of characters
                        in context/question.
 
-            :returns torch.Tensor of size ().
+            :returns torch.Tensor of size (batch_size, 96, num_words).
         """
         char_embeddings = self.char_embedding(char_idxs)
         char_embeddings = self.char_dropout(char_embeddings)
@@ -105,15 +106,195 @@ class HighwayNetwork(nn.Module):
         self.transforms = nn.ModuleList([InitializedConv1d(hidden_size, hidden_size, bias=True)
                                          for _ in range(num_layers)])
         self.gates = nn.ModuleList([InitializedConv1d(hidden_size, hidden_size, bias=True)
-                                   for _ in range(num_layers)])
+                                    for _ in range(num_layers)])
 
     def forward(self, x):
-
         for gate, transform in zip(self.gates, self.transforms):
             g = torch.sigmoid(gate(x))
             # t = F.relu(transform(x))
             t = transform(x)
             t = F.dropout(x, p=0.1)
             x = g * t + (1 - g) * x
+
+        return x
+
+
+class EncoderBlock(nn.Module):
+    """QANet encoder block."""
+
+    # TODO: Parameterize 96
+
+    def __init__(self, num_convs, input_dim, kernel_size, num_heads, num_blocks, block_index):
+        super(EncoderBlock, self).__init__()
+
+        self.num_convs = num_convs
+        self.layers_per_block = num_convs + 1
+        self.L = self.layers_per_block * num_blocks  # Total # of layers
+        self.l = float(self.layers_per_block * block_index + 1)
+
+        # Layers within residual blocks containing depthwise separable convolution
+        self.conv_layernorms = nn.ModuleList([nn.LayerNorm(96) for _ in range(num_convs)])
+        self.depthwise_convs = nn.ModuleList(
+            [DepthwiseSeparableConvolution(input_dim, kernel_size) for _ in range(num_convs)])
+
+        # Layers within residual block containing self-attention
+        self.attention_layernorm = nn.LayerNorm(96)
+        self.attention = SelfAttention(input_dim, num_heads)
+
+        # Layers within residual block containing Feedforward layer
+        self.feedforward_layernorm = nn.LayerNorm(96)
+        self.feedforward = FeedForward(input_dim)
+
+    def forward(self, x, padding_mask):
+        """
+
+        Parameters:
+            x:
+            padding_mask: torch.Tensor representing a binary mask where a value True denotes a padding element.
+
+            :returns: torch.Tensor of size (batch_size, 96, num_words)
+        """
+        # print('input:', x.size())
+        x = PositionEncoder(x)
+
+        # print('PositionEncoder:', x.size())
+        # print('---- Residual block ----')
+        # First num_convolution residual blocks
+        for i, (depthwise_conv, layernorm) in enumerate(zip(self.depthwise_convs, self.conv_layernorms)):
+            residual = x
+            x = layernorm(x.transpose(1, 2)).transpose(1, 2)
+            # print('depthwise_layernorm:', x.size())
+
+            if i % 2 == 0:
+                x = F.dropout(x, p=0.1, training=self.training)
+
+            x = depthwise_conv(x)
+            # print('depthwise:', x.size())
+            x = self.layer_dropout(x, residual, dropout=0.1 * self.l / self.L)
+            # print('layer_dropout:', x.size())
+
+            self.l += 1
+
+        # print('---- Residual block ----')
+        # Self-attention residual block
+        residual = x
+        x = self.attention_layernorm(x.transpose(1, 2)).transpose(1, 2)
+        # print('attention_layernorm:', x.size())
+        x = F.dropout(x, p=0.1, training=self.training)
+        # print('att_dropout:', x.size())
+        x = self.attention(x, padding_mask)
+        # print('attention:', x.size())
+        x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
+        # print('attention layer_dropout:', x.size())
+
+        self.l += 1
+
+        # print('---- Residual block ----')
+        residual = x
+        x = self.feedforward_layernorm(x.transpose(1, 2)).transpose(1, 2)
+        # print('feedforward layernorm:', x.size())
+        x = F.dropout(x, p=0.1, training=self.training)
+        x = self.feedforward(x)
+        # print('feedforward:', x.size())
+        x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
+        # print('feedforward layer_dropout:', x.size())
+
+        return x
+
+    def layer_dropout(self, inputs, residual, dropout):
+        if self.training:
+            pred = torch.empty(1).uniform_(0, 1) < dropout
+            if pred:
+                return residual
+            else:
+                return F.dropout(inputs, dropout, training=self.training) + residual
+        else:
+            return inputs + residual
+
+
+def PositionEncoder(x, min_timescale=1.0, max_timescale=1.0e4):
+    x = x.transpose(1, 2)
+    length = x.size()[1]
+    channels = x.size()[2]
+    signal = get_timing_signal(length, channels, min_timescale, max_timescale)
+    return (x + signal).transpose(1, 2)
+
+
+def get_timing_signal(length, channels, min_timescale=1.0, max_timescale=1.0e4):
+    position = torch.arange(length).type(torch.float32)
+    num_timescales = channels // 2
+    log_timescale_increment = (math.log(float(max_timescale) / float(min_timescale)) / (float(num_timescales) - 1))
+    inv_timescales = min_timescale * torch.exp(
+        torch.arange(num_timescales).type(torch.float32) * -log_timescale_increment)
+    scaled_time = position.unsqueeze(1) * inv_timescales.unsqueeze(0)
+    signal = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
+    m = nn.ZeroPad2d((0, (channels % 2), 0, 0))
+    signal = m(signal)
+    signal = signal.view(1, length, channels)
+    return signal
+
+
+class DepthwiseSeparableConvolution(nn.Module):
+    """Depthwise Separable Convolution used in QANet encoder block."""
+
+    def __init__(self, input_dim, kernel_size, bias=True):
+        super(DepthwiseSeparableConvolution, self).__init__()
+
+        self.depthwise = nn.Conv1d(input_dim, input_dim, kernel_size, padding=kernel_size // 2, groups=input_dim,
+                                   bias=False)
+        self.pointwise = nn.Conv1d(input_dim, input_dim, kernel_size=1, padding=0, bias=bias)
+
+    def forward(self, x):
+        """
+        Parameters:
+            x:
+            :returns: torch.Tensor of size (batch_size, 96, num_words)
+        """
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = F.relu(x)
+
+        return x
+
+
+class SelfAttention(nn.Module):
+
+    def __init__(self, input_dim, num_heads):
+        super(SelfAttention, self).__init__()
+        self.attention = nn.MultiheadAttention(input_dim, num_heads)
+
+    def forward(self, x, key_padding_mask=None):
+        """
+        Parameters
+            key_padding_mask:  If provided, specified padding elements in the key will be ignored by the attention.
+                               When given a binary mask and a value is True, the corresponding value on the attention
+                               layer will be ignored. When given a byte mask and a value is non-zero, the corresponding
+                               value on the attention layer will be ignored.
+
+            :returns: torch.Tensor of size (batch_size, 96, num_words)
+        """
+        x = x.permute(2, 0, 1)
+        x, _ = self.attention(x, x, x, key_padding_mask=key_padding_mask, need_weights=False)
+        x = x.permute(1, 2, 0)
+
+        return x
+
+
+class FeedForward(nn.Module):
+
+    def __init__(self, input_dim):
+        super(FeedForward, self).__init__()
+
+        self.non_linear_conv = InitializedConv1d(input_dim, input_dim, relu=True, bias=True)
+        self.linear_conv = InitializedConv1d(input_dim, input_dim, relu=True, bias=True)
+
+    def forward(self, x):
+        """
+        Parameters:
+            x:
+            :returns: torch.Tensor of size (batch_size, 96, num_words)
+        """
+        x = self.non_linear_conv(x)
+        x = self.linear_conv(x)
 
         return x
