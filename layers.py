@@ -34,7 +34,7 @@ class Embedding(nn.Module):
         char_embed_size: ..
     """
 
-    def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size, hidden_size=96):
+    def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size, hidden_size):
         super(Embedding, self).__init__()
 
         self.word_embeddings = nn.Embedding.from_pretrained(word_embeddings)
@@ -121,13 +121,9 @@ class HighwayNetwork(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    """QANet encoder block.
+    """QANet encoder block."""
 
-    Parameters:
-       d: Like hidden_size in other layers
-    """
-
-    def __init__(self, num_convs, input_dim, kernel_size, d, num_heads, num_blocks, block_index):
+    def __init__(self, num_convs, hidden_size, kernel_size, num_heads, num_blocks, block_index):
         super(EncoderBlock, self).__init__()
 
         self.num_convs = num_convs
@@ -136,17 +132,17 @@ class EncoderBlock(nn.Module):
         self.l = float(self.layers_per_block * block_index + 1)
 
         # Layers within residual blocks containing depthwise separable convolution
-        self.conv_layernorms = nn.ModuleList([nn.LayerNorm(d) for _ in range(num_convs)])
+        self.conv_layernorms = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_convs)])
         self.depthwise_convs = nn.ModuleList(
-            [DepthwiseSeparableConvolution(input_dim, kernel_size, d) for _ in range(num_convs)])
+            [DepthwiseSeparableConvolution(hidden_size, kernel_size) for _ in range(num_convs)])
 
         # Layers within residual block containing self-attention
-        self.attention_layernorm = nn.LayerNorm(d)
-        self.attention = SelfAttention(input_dim, d, num_heads)
+        self.attention_layernorm = nn.LayerNorm(hidden_size)
+        self.attention = SelfAttention(hidden_size, num_heads)
 
         # Layers within residual block containing Feedforward layer
-        self.feedforward_layernorm = nn.LayerNorm(d)
-        self.feedforward = FeedForward(input_dim)
+        self.feedforward_layernorm = nn.LayerNorm(hidden_size)
+        self.feedforward = FeedForward(hidden_size)
 
     def forward(self, x, padding_mask):
         """
@@ -240,12 +236,12 @@ def get_timing_signal(length, channels, min_timescale=1.0, max_timescale=1.0e4):
 class DepthwiseSeparableConvolution(nn.Module):
     """Depthwise Separable Convolution used in QANet encoder block."""
 
-    def __init__(self, input_dim, kernel_size, bias=True):
+    def __init__(self, hidden_size, kernel_size, bias=True):
         super(DepthwiseSeparableConvolution, self).__init__()
 
-        self.depthwise = nn.Conv1d(input_dim, input_dim, kernel_size, padding=kernel_size // 2, groups=input_dim,
+        self.depthwise = nn.Conv1d(hidden_size, hidden_size, kernel_size, padding=kernel_size // 2, groups=hidden_size,
                                    bias=False)
-        self.pointwise = nn.Conv1d(input_dim, input_dim, kernel_size=1, padding=0, bias=bias)
+        self.pointwise = nn.Conv1d(hidden_size, hidden_size, kernel_size=1, padding=0, bias=bias)
 
     def forward(self, x):
         """
@@ -262,9 +258,9 @@ class DepthwiseSeparableConvolution(nn.Module):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, input_dim, hidde_size, num_heads):
+    def __init__(self, hidden_size, num_heads):
         super(SelfAttention, self).__init__()
-        self.attention = nn.MultiheadAttention(input_dim, num_heads)
+        self.attention = nn.MultiheadAttention(hidden_size, num_heads)
 
     def forward(self, x, key_padding_mask=None):
         """
@@ -285,11 +281,11 @@ class SelfAttention(nn.Module):
 
 class FeedForward(nn.Module):
 
-    def __init__(self, input_dim):
+    def __init__(self, hidden_size):
         super(FeedForward, self).__init__()
 
-        self.non_linear_conv = InitializedConv1d(input_dim, input_dim, relu=True, bias=True)
-        self.linear_conv = InitializedConv1d(input_dim, input_dim, relu=True, bias=True)
+        self.non_linear_conv = InitializedConv1d(hidden_size, hidden_size, relu=True, bias=True)
+        self.linear_conv = InitializedConv1d(hidden_size, hidden_size, relu=True, bias=True)
 
     def forward(self, x):
         """
@@ -305,7 +301,7 @@ class FeedForward(nn.Module):
 
 class ContextQueryAttention(nn.Module):
 
-    def __init__(self, hidden_size=96):
+    def __init__(self, hidden_size):
         super(ContextQueryAttention, self).__init__()
 
         self.context_weights = nn.Parameter(torch.empty(hidden_size, 1))
@@ -339,7 +335,7 @@ class ContextQueryAttention(nn.Module):
         b = torch.bmm(torch.bmm(s1, s2.transpose(1, 2)), c)
         x = torch.cat([c, a, c * a, c * b], dim=2)
 
-        return x
+        return x.transpose(1, 2)
 
     def compute_similarity_matrix(self, c, q):
         c_len, q_len = c.size(1), q.size(1)
@@ -359,11 +355,11 @@ class EncoderLayer(nn.Module):
     the embedding encoder layer and model encoder layer in QANet.
     """
 
-    def __init__(self, num_convs, input_dim, kernel_size, d, num_heads, num_blocks):
+    def __init__(self, num_convs, hidden_size, kernel_size, num_heads, num_blocks):
         super(EncoderLayer, self).__init__()
 
         self.encoder_blocks = nn.ModuleList(
-            [EncoderBlock(num_convs, input_dim, kernel_size, d, num_heads, num_blocks, block_index=i)
+            [EncoderBlock(num_convs, hidden_size, kernel_size, num_heads, num_blocks, block_index=i)
              for i in range(num_blocks)])
 
     def forward(self, x, key_padding_mask=None):
