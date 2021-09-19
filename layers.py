@@ -34,16 +34,16 @@ class Embedding(nn.Module):
         char_embed_size: ..
     """
 
-    def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size):
+    def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size, hidden_size=96):
         super(Embedding, self).__init__()
 
         self.word_embeddings = nn.Embedding.from_pretrained(word_embeddings)
-        self.char_embedding = CharEmbedding(char_embeddings, char_embed_size)
-        self.highway = HighwayNetwork(2, 96)
+        self.char_embedding = CharEmbedding(char_embeddings, char_embed_size, hidden_size)
+        self.highway = HighwayNetwork(2, hidden_size)
 
         self.word_dropout = nn.Dropout(0.1)
         self.char_dropout = nn.Dropout(0.05)
-        self.conv1d = InitializedConv1d(word_embed_size + 96, 96)
+        self.conv1d = InitializedConv1d(word_embed_size + hidden_size, hidden_size)
 
     def forward(self, word_idxs, char_idxs):
         """Parameters:
@@ -51,7 +51,7 @@ class Embedding(nn.Module):
             char_idxs: torch.Tensor of size (batch_size, num_words, max_word_len). Indices of characters
                        in context/query.
 
-            :returns torch.Tensor of size (batch_size, 96, num_words).
+            :returns torch.Tensor of size (batch_size, hidden_size, num_words).
         """
         char_embeddings = self.char_embedding(char_idxs)
         char_embeddings = self.char_dropout(char_embeddings)
@@ -70,20 +70,19 @@ class Embedding(nn.Module):
 class CharEmbedding(nn.Module):
     """Character embedding used as part of the Embedding layer."""
 
-    def __init__(self, char_embeddings, char_embed_size):
+    def __init__(self, char_embeddings, char_embed_size, hidden_size):
         super(CharEmbedding, self).__init__()
 
         self.char_embedding = nn.Embedding.from_pretrained(char_embeddings, freeze=False)
 
-        # TODO: Parameterize 96
-        self.conv2d = nn.Conv2d(char_embed_size, 96, kernel_size=(1, 5), padding=0, bias=True)
+        self.conv2d = nn.Conv2d(char_embed_size, hidden_size, kernel_size=(1, 5), padding=0, bias=True)
         nn.init.kaiming_normal_(self.conv2d.weight, nonlinearity='relu')
 
     def forward(self, char_idxs):
         """Parameters:
             char_idxs: torch.Tensor of size (batch_size, num_words, max_word_len).
 
-            :returns: torch.Tensor of size (batch_size, 96, num_words).
+            :returns: torch.Tensor of size (batch_size, hidden_size, num_words).
         """
         batch_size, num_words, max_word_len = char_idxs.size()
 
@@ -91,7 +90,7 @@ class CharEmbedding(nn.Module):
         x = self.char_embedding(char_idxs)
         x = x.permute(0, 3, 1, 2)
 
-        # Size: (batch_size, 96, max_word_len, 12)
+        # Size: (batch_size, hidden_size, max_word_len, 12)
         x = self.conv2d(x)
         x = F.relu(x)
         x, _ = torch.max(x, dim=3)
@@ -122,11 +121,13 @@ class HighwayNetwork(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    """QANet encoder block."""
+    """QANet encoder block.
 
-    # TODO: Parameterize 96
+    Parameters:
+       d: Like hidden_size in other layers
+    """
 
-    def __init__(self, num_convs, input_dim, kernel_size, num_heads, num_blocks, block_index):
+    def __init__(self, num_convs, input_dim, kernel_size, d, num_heads, num_blocks, block_index):
         super(EncoderBlock, self).__init__()
 
         self.num_convs = num_convs
@@ -135,16 +136,16 @@ class EncoderBlock(nn.Module):
         self.l = float(self.layers_per_block * block_index + 1)
 
         # Layers within residual blocks containing depthwise separable convolution
-        self.conv_layernorms = nn.ModuleList([nn.LayerNorm(96) for _ in range(num_convs)])
+        self.conv_layernorms = nn.ModuleList([nn.LayerNorm(d) for _ in range(num_convs)])
         self.depthwise_convs = nn.ModuleList(
-            [DepthwiseSeparableConvolution(input_dim, kernel_size) for _ in range(num_convs)])
+            [DepthwiseSeparableConvolution(input_dim, kernel_size, d) for _ in range(num_convs)])
 
         # Layers within residual block containing self-attention
-        self.attention_layernorm = nn.LayerNorm(96)
-        self.attention = SelfAttention(input_dim, num_heads)
+        self.attention_layernorm = nn.LayerNorm(d)
+        self.attention = SelfAttention(input_dim, d, num_heads)
 
         # Layers within residual block containing Feedforward layer
-        self.feedforward_layernorm = nn.LayerNorm(96)
+        self.feedforward_layernorm = nn.LayerNorm(d)
         self.feedforward = FeedForward(input_dim)
 
     def forward(self, x, padding_mask):
@@ -154,7 +155,7 @@ class EncoderBlock(nn.Module):
             x:
             padding_mask: torch.Tensor representing a binary mask where a value True denotes a padding element.
 
-            :returns: torch.Tensor of size (batch_size, 96, num_words)
+            :returns: torch.Tensor of size (batch_size, d, num_words)
         """
         # print('input:', x.size())
         x = PositionEncoder(x)
@@ -250,7 +251,7 @@ class DepthwiseSeparableConvolution(nn.Module):
         """
         Parameters:
             x:
-            :returns: torch.Tensor of size (batch_size, 96, num_words)
+            :returns: torch.Tensor of size (batch_size, hidden_size, num_words)
         """
         x = self.depthwise(x)
         x = self.pointwise(x)
@@ -261,7 +262,7 @@ class DepthwiseSeparableConvolution(nn.Module):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, input_dim, num_heads):
+    def __init__(self, input_dim, hidde_size, num_heads):
         super(SelfAttention, self).__init__()
         self.attention = nn.MultiheadAttention(input_dim, num_heads)
 
@@ -273,7 +274,7 @@ class SelfAttention(nn.Module):
                                layer will be ignored. When given a byte mask and a value is non-zero, the corresponding
                                value on the attention layer will be ignored.
 
-            :returns: torch.Tensor of size (batch_size, 96, num_words)
+            :returns: torch.Tensor of size (batch_size, hidden_size, num_words)
         """
         x = x.permute(2, 0, 1)
         x, _ = self.attention(x, x, x, key_padding_mask=key_padding_mask, need_weights=False)
@@ -294,7 +295,7 @@ class FeedForward(nn.Module):
         """
         Parameters:
             x:
-            :returns: torch.Tensor of size (batch_size, 96, num_words)
+            :returns: torch.Tensor of size (batch_size, hidden_size, num_words)
         """
         x = self.non_linear_conv(x)
         x = self.linear_conv(x)
@@ -358,11 +359,11 @@ class EncoderLayer(nn.Module):
     the embedding encoder layer and model encoder layer in QANet.
     """
 
-    def __init__(self, num_convs, input_dim, kernel_size, num_heads, num_blocks):
+    def __init__(self, num_convs, input_dim, kernel_size, d, num_heads, num_blocks):
         super(EncoderLayer, self).__init__()
 
         self.encoder_blocks = nn.ModuleList(
-            [EncoderBlock(num_convs, input_dim, kernel_size, num_heads, num_blocks, block_index=i)
+            [EncoderBlock(num_convs, input_dim, kernel_size, d, num_heads, num_blocks, block_index=i)
              for i in range(num_blocks)])
 
     def forward(self, x, key_padding_mask=None):
@@ -371,5 +372,3 @@ class EncoderLayer(nn.Module):
             x = encoder_block(x, key_padding_mask)
 
         return x
-
-
