@@ -324,10 +324,6 @@ class ContextQueryAttention(nn.Module):
 
             :returns: torch.Tensor of size (batch_size, c_len[num_words], 4 * hidden_size)
         """
-        print('c:', c.size())
-        print('q:', q.size())
-        print('c_mask:', c_mask.size())
-        print('q_mask:', q_mask.size())
 
         c, q = c.transpose(1, 2), q.transpose(1, 2)
         batch_size, c_len, q_len = c.size()[0], c.size()[1], q.size()[1]
@@ -342,7 +338,6 @@ class ContextQueryAttention(nn.Module):
         b = torch.bmm(torch.bmm(s1, s2.transpose(1, 2)), c)
         x = torch.cat([c, a, c * a, c * b], dim=2)
 
-        print('x:', x.size())
         return x
 
     def compute_similarity_matrix(self, c, q):
@@ -356,4 +351,25 @@ class ContextQueryAttention(nn.Module):
         s = s0 + s1 + s2 + self.bias
 
         return s
+
+
+class EncoderLayer(nn.Module):
+    """Encoder layer wrapping multiple encoder blocks used. It is used to construct
+    the embedding encoder layer and model encoder layer in QANet.
+    """
+
+    def __init__(self, num_convs, input_dim, kernel_size, num_heads, num_blocks):
+        super(EncoderLayer, self).__init__()
+
+        self.encoder_blocks = nn.ModuleList(
+            [EncoderBlock(num_convs, input_dim, kernel_size, num_heads, num_blocks, block_index=i)
+             for i in range(num_blocks)])
+
+    def forward(self, x, key_padding_mask=None):
+
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x, key_padding_mask)
+
+        return x
+
 
