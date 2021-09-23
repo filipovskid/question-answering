@@ -1,9 +1,12 @@
 import json
-
-import numpy as np
 import torch
 import argparse
+import math
+
+import numpy as np
 import torch.utils.data as data
+import torch.optim as optim
+import torch.nn.functional as F
 
 from datasets import SQuAD
 from tqdm import tqdm
@@ -91,13 +94,21 @@ def parse_args():
                         type=int,
                         default=50000,
                         help='Number of steps between successive evaluations.')
+    parser.add_argument('--base_lr',
+                        type=float,
+                        default=1.0,
+                        help='Base learning rate.')
     parser.add_argument('--lr',
                         type=float,
-                        default=0.5,
+                        default=0.001,
                         help='Learning rate.')
+    parser.add_argument('--num_warmup_steps',
+                        type=int,
+                        default=1000,
+                        help='Number of warming up steps.')
     parser.add_argument('--l2_wd',
                         type=float,
-                        default=0,
+                        default=5e-8,
                         help='L2 weight decay.')
     parser.add_argument('--num_epochs',
                         type=int,
@@ -138,6 +149,7 @@ def collate_fn(samples):
     Adapted from:
         https://github.com/yunjey/seq2seq-dataloader
     """
+
     def merge_0d(scalars, dtype=torch.int64):
         return torch.tensor(scalars, dtype=dtype)
 
@@ -160,8 +172,8 @@ def collate_fn(samples):
 
     # Group by tensor type
     context_idxs, context_char_idxs, \
-        question_idxs, question_char_idxs, \
-        y1s, y2s, ids = zip(*samples)
+    question_idxs, question_char_idxs, \
+    y1s, y2s, ids = zip(*samples)
 
     # Merge into batch tensors
     context_idxs = merge_1d(context_idxs)
@@ -189,6 +201,8 @@ def torch_from_json(path, dtype=torch.float32):
 def main(config):
     word_embeddings = torch_from_json(config.word_emb_file)
     char_embeddings = torch_from_json(config.char_emb_file)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
     model = QANet(word_embeddings=word_embeddings,
                   char_embeddings=char_embeddings,
                   word_embed_size=config.word_embed_size,
@@ -202,36 +216,49 @@ def main(config):
                   model_encoder_kernel_size=5,
                   model_encoder_num_heads=4,
                   model_encoder_num_blocks=7)
+    model.to(device)
 
-    training_data = SQuAD(config.dev_record_file)
-    data_loader = data.DataLoader(training_data,
+    optimizer = optim.Adam(model.parameters(), lr=config.base_lr, betas=(0.9, 0.999), eps=1e-08,
+                           weight_decay=config.l2_wd)
+    cr = config.lr / math.log2(config.num_warmup_steps)
+    scheduler = optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda s: cr * math.log2(s + 1) if s < config.num_warmup_steps else config.lr
+    )
+
+    train_dataset = SQuAD(config.train_record_file)
+    data_loader = data.DataLoader(train_dataset,
                                   batch_size=config.batch_size,
                                   shuffle=False,
                                   num_workers=config.num_workers,
                                   collate_fn=collate_fn)
 
-    i = 0
-    with tqdm(total=len(data_loader.dataset)) as progress:
-        for context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids in data_loader:
-            # print('context_words_ids:', context_idxs.size())        # (64, 312)
-            # print('context_char_ids:', context_char_idxs.size())    # (64, 312, 16)
-            # print('question_words_ids:', question_idxs.size())      # (64, 17)
-            # print('question_char_ids:', question_char_idxs.size())  # (64, 17, 16)
-            # print('y1:', y1.size())                                 # (64)
-            # print('y2:', y2.size())                                 # (64)
-            # print('ids:', ids.size())                               # (64)
-            # progress.update(config.batch_size)
+    print("Training..")
+    for epoch in range(1, config.num_epochs + 1):
 
-            y1, y2 = model(context_idxs, context_char_idxs, question_idxs, question_char_idxs)
-            print(y1)
-            print(y2)
-            progress.update(config.batch_size)
-            i += 1
+        print(f"Epoch {epoch}/{config.num_epochs}")
+        with tqdm(total=len(data_loader.dataset)) as progress:
+            for context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids in data_loader:
+                batch_size = context_idxs.size()[0]
+                optimizer.zero_grad()
 
-            if i == 1:
-                break
+                context_idxs = context_idxs.to(device)
+                context_char_idxs = context_char_idxs.to(device)
+                question_idxs = question_idxs.to(device)
+                question_char_idxs = question_char_idxs.to(device)
 
-            # break
+                y1, y2 = y1.to(device), y2.to(device)
+
+                log_p1, log_p2 = model(context_idxs, context_char_idxs, question_idxs, question_char_idxs)
+                loss = F.nll_loss(log_p1, y1) + F.nll_loss(log_p2, y2)
+
+                loss.backward()
+                torch.nn.utils.clip_grad_value_(model.parameters(), config.max_grad_norm)
+                optimizer.step()
+                scheduler.step()
+
+                progress.update(batch_size)
+                progress.set_postfix(epoch=epoch, loss=loss.item())
 
 
 if __name__ == '__main__':
