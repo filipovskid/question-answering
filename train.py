@@ -1,9 +1,13 @@
+import json
+
+import numpy as np
 import torch
 import argparse
 import torch.utils.data as data
 
 from datasets import SQuAD
 from tqdm import tqdm
+from models import QANet
 
 
 def parse_args():
@@ -58,6 +62,14 @@ def parse_args():
                         default=64,
                         help='Batch size per GPU. Scales automatically when \
                                   multiple GPUs are available.')
+    parser.add_argument('--char_embed_size',
+                        type=int,
+                        default=64,
+                        help='Dimension of character embedding vector.')
+    parser.add_argument('--word_embed_size',
+                        type=int,
+                        default=300,
+                        help='Dimension of word embedding vector.')
     parser.add_argument('--use_squad_v2',
                         type=lambda s: s.lower().startswith('t'),
                         default=True,
@@ -165,7 +177,32 @@ def collate_fn(samples):
             y1s, y2s, ids)
 
 
+def torch_from_json(path, dtype=torch.float32):
+    with open(path, 'r') as f:
+        array = np.array(json.load(f))
+
+    tensor = torch.from_numpy(array).type(dtype)
+
+    return tensor
+
+
 def main(config):
+    word_embeddings = torch_from_json(config.word_emb_file)
+    char_embeddings = torch_from_json(config.char_emb_file)
+    model = QANet(word_embeddings=word_embeddings,
+                  char_embeddings=char_embeddings,
+                  word_embed_size=config.word_embed_size,
+                  char_embed_size=config.char_embed_size,
+                  hidden_size=96,
+                  embed_encoder_num_convs=4,
+                  embed_encoder_kernel_size=7,
+                  embed_encoder_num_heads=4,
+                  embed_encoder_num_blocks=1,
+                  model_encoder_num_convs=2,
+                  model_encoder_kernel_size=5,
+                  model_encoder_num_heads=4,
+                  model_encoder_num_blocks=7)
+
     training_data = SQuAD(config.dev_record_file)
     data_loader = data.DataLoader(training_data,
                                   batch_size=config.batch_size,
@@ -173,17 +210,28 @@ def main(config):
                                   num_workers=config.num_workers,
                                   collate_fn=collate_fn)
 
+    i = 0
     with tqdm(total=len(data_loader.dataset)) as progress:
         for context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids in data_loader:
-            print('context_words_ids:', context_idxs.size())        # (64, 312)
-            print('context_char_ids:', context_char_idxs.size())    # (64, 312, 16)
-            print('question_words_ids:', question_idxs.size())      # (64, 17)
-            print('question_char_ids:', question_char_idxs.size())  # (64, 17, 16)
-            print('y1:', y1.size())                                 # (64)
-            print('y2:', y2.size())                                 # (64)
-            print('ids:', ids.size())                               # (64)
+            # print('context_words_ids:', context_idxs.size())        # (64, 312)
+            # print('context_char_ids:', context_char_idxs.size())    # (64, 312, 16)
+            # print('question_words_ids:', question_idxs.size())      # (64, 17)
+            # print('question_char_ids:', question_char_idxs.size())  # (64, 17, 16)
+            # print('y1:', y1.size())                                 # (64)
+            # print('y2:', y2.size())                                 # (64)
+            # print('ids:', ids.size())                               # (64)
+            # progress.update(config.batch_size)
+
+            y1, y2 = model(context_idxs, context_char_idxs, question_idxs, question_char_idxs)
+            print(y1)
+            print(y2)
             progress.update(config.batch_size)
-            break
+            i += 1
+
+            if i == 1:
+                break
+
+            # break
 
 
 if __name__ == '__main__':
