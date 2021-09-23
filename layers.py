@@ -215,7 +215,7 @@ def PositionEncoder(x, min_timescale=1.0, max_timescale=1.0e4):
     x = x.transpose(1, 2)
     length = x.size()[1]
     channels = x.size()[2]
-    signal = get_timing_signal(length, channels, min_timescale, max_timescale)
+    signal = get_timing_signal(length, channels, min_timescale, max_timescale).to(x.device)
     return (x + signal).transpose(1, 2)
 
 
