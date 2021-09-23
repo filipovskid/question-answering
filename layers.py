@@ -368,3 +368,24 @@ class EncoderLayer(nn.Module):
             x = encoder_block(x, key_padding_mask)
 
         return x
+
+
+class QuestionAnsweringOutput(nn.Module):
+
+    def __init__(self, hidden_size):
+        super(QuestionAnsweringOutput, self).__init__()
+
+        self.linear_w1 = InitializedConv1d(hidden_size * 2, 1)
+        self.linear_w2 = InitializedConv1d(hidden_size * 2, 1)
+
+    def forward(self, M0, M1, M2, key_padding_mask):
+        concat_start = torch.cat([M0, M1], dim=1)
+        concat_end = torch.cat([M0, M2], dim=1)
+
+        linear_start = self.linear_w1(concat_start)
+        linear_end = self.linear_w2(concat_end)
+
+        y1 = masked_softmax(linear_start.squeeze(), key_padding_mask, log_softmax=True)
+        y2 = masked_softmax(linear_end.squeeze(), key_padding_mask, log_softmax=True)
+
+        return y1, y2
