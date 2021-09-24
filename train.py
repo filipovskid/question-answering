@@ -303,7 +303,7 @@ def main(config):
                 step += batch_size
                 steps_till_eval -= batch_size
                 if steps_till_eval <= 0:
-                    steps_till_eval -= batch_size
+                    steps_till_eval = config.eval_steps
 
                     print(f'\nEvaluating at step {step}..')
                     with ema.average_parameters([param for param in model.parameters() if param.requires_grad]):
