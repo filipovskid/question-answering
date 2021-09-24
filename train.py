@@ -215,6 +215,7 @@ def torch_from_json(path, dtype=torch.float32):
 
 
 def main(config):
+    print(f'Config: ', json.dumps(config, sort_keys=True, indent=4))
     word_embeddings = torch_from_json(config.word_emb_file)
     char_embeddings = torch_from_json(config.char_emb_file)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -274,7 +275,7 @@ def main(config):
     print("Training..")
     for epoch in range(epoch, config.num_epochs + 1):
 
-        print(f"Epoch {epoch}/{config.num_epochs}")
+        print(f"\nEpoch {epoch}/{config.num_epochs}")
         with tqdm(total=len(train_dataset)) as progress:
             for batch_count, (context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids) in \
                     enumerate(train_loader):
