@@ -1,13 +1,22 @@
 from __future__ import division
 from __future__ import unicode_literals
 
-import torch
-import torch.nn.functional as F
-
 from typing import Iterable, Optional
+
+import torch
+import collections
 import weakref
 import copy
 import contextlib
+import string
+import re
+import os
+import shutil
+import queue
+import pathlib
+
+import torch.nn.functional as F
+import ujson as json
 
 
 class EMA:
@@ -290,6 +299,128 @@ class EMA:
             )
 
 
+class CheckpointManager:
+    """Class to save and load model checkpoints.
+    Save the best checkpoints as measured by a metric value passed into the
+    `save` method. Overwrite checkpoints with better checkpoints once
+    `max_checkpoints` have been saved.
+    Args:
+        save_dir (str): Directory to save checkpoints.
+        max_checkpoints (int): Maximum number of checkpoints to keep before
+            overwriting old ones.
+        metric_name (str): Name of metric used to determine best model.
+        maximize_metric (bool): If true, best checkpoint is that which maximizes
+            the metric value passed in via `save`. Otherwise, best checkpoint
+            minimizes the metric.
+        log (logging.Logger): Optional logger for printing information.
+
+    Adapted from:
+        > https://github.com/chrischute/squad/blob/master/util.py
+    """
+
+    def __init__(self, save_dir, max_checkpoints, metric_name, maximize_metric=False, log=None):
+        super(CheckpointManager, self).__init__()
+
+        self.save_dir = save_dir
+        self.max_checkpoints = max_checkpoints
+        self.metric_name = metric_name
+        self.maximize_metric = maximize_metric
+        self.best_val = None
+        self.ckpt_paths = queue.PriorityQueue()
+        self.log = log
+        self._print(f"Saver will {'max' if maximize_metric else 'min'}imize {metric_name}...")
+
+        save_dir_path = pathlib.Path(self.save_dir)
+        save_dir_path.mkdir(parents=True, exist_ok=True)
+
+    def is_best(self, metric_val):
+        """Check whether `metric_val` is the best seen so far.
+        Args:
+            metric_val (float): Metric value to compare to prior checkpoints.
+        """
+        if metric_val is None:
+            # No metric reported
+            return False
+
+        if self.best_val is None:
+            # No checkpoint saved yet
+            return True
+
+        return ((self.maximize_metric and self.best_val < metric_val)
+                or (not self.maximize_metric and self.best_val > metric_val))
+
+    def _print(self, message):
+        """Print a message if logging is enabled."""
+        if self.log is not None:
+            self.log.info(message)
+        else:
+            print(message)
+
+    def save(self, step, model, metric_val, device, predictions=None):
+        """Save model parameters to disk.
+        Args:
+            step (int): Total number of examples seen during training so far.
+            model (torch.nn.DataParallel): Model to save.
+            metric_val (float): Determines whether checkpoint is best so far.
+            device (torch.device): Device where model resides.
+            predictions (dict): Question id - predicted answer mappings.
+        """
+        ckpt_dict = {
+            'model_name': model.__class__.__name__,
+            'model_state': model.cpu().state_dict(),
+            'step': step
+        }
+        model.to(device)
+
+        checkpoint_path = os.path.join(self.save_dir, f'step_{step}.pth.tar')
+        predictions_path = os.path.join(self.save_dir, f'step_{step}_predictions.json')
+
+        torch.save(ckpt_dict, checkpoint_path)
+
+        if predictions:
+            with open(predictions_path, "w") as f:
+                json.dump(predictions, f)
+
+        self._print(f'Saved checkpoint: {checkpoint_path}')
+
+        if self.is_best(metric_val):
+            # Save the best model
+            self.best_val = metric_val
+            best_path = os.path.join(self.save_dir, 'best.pth.tar')
+            shutil.copy(checkpoint_path, best_path)
+            self._print(f'New best checkpoint at step {step}...')
+
+        # Add checkpoint path to priority queue (lowest priority removed first)
+        if self.maximize_metric:
+            priority_order = metric_val
+        else:
+            priority_order = -metric_val
+
+        self.ckpt_paths.put((priority_order, checkpoint_path))
+
+        # Remove a checkpoint if more than max_checkpoints have been saved
+        if self.ckpt_paths.qsize() > self.max_checkpoints:
+            _, worst_ckpt = self.ckpt_paths.get()
+            try:
+                os.remove(worst_ckpt)
+                self._print(f'Removed checkpoint: {worst_ckpt}')
+            except OSError:
+                # Avoid crashing if checkpoint has been removed or protected
+                pass
+
+    def load_model(self, model, checkpoint_path, device):
+        """Load model from checkpoint"""
+        self._print(f'Loading model checkpoint from {checkpoint_path}.')
+        ckpt_dict = torch.load(checkpoint_path, map_location=device)
+
+        model.load_state_dict(ckpt_dict['model_state'])
+        step = ckpt_dict['step']
+
+        self._print(f'Model loaded, step: {step}.')
+
+        return model, step
+
+
 def mask_logits(logits, mask):
     mask = mask.type(torch.float32)
     return (1 - mask) * logits + mask * -1e30
@@ -342,3 +473,103 @@ def infer_span(p_start, p_end):
     end_idxs[p_no_answer > max_joint_p] = 0
 
     return start_idxs, end_idxs
+
+
+def convert_tokens(eval_dict, qa_id, start_idxs, end_idxs):
+    answer_dict = {}
+    global_dict = {}
+
+    for qid, start_idx, end_idx in zip(qa_id, start_idxs, end_idxs):
+        qid = str(qid)
+        context = eval_dict[qid]['context']
+        spans = eval_dict[qid]['spans']
+        uuid = eval_dict[qid]['uuid']
+
+        if start_idx == 0 or end_idx == 0:
+            answer_dict[qid] = ''
+            global_dict[uuid] = ''
+        else:
+            start_idx, end_idx = start_idx - 1, end_idx - 1
+            token_start_idx = spans[start_idx][0]
+            token_end_idx = spans[end_idx][1]
+
+            answer_dict[qid] = context[token_start_idx:token_end_idx]
+            global_dict[uuid] = context[token_start_idx:token_end_idx]
+
+    return answer_dict, global_dict
+
+
+def compute_metrics(eval_dict, answer_dict):
+    """Measure scores over predicted and ground truth answers.
+    There are multiple possible ground_truth answers, so the
+    maximum score is taken.
+    """
+    f1_score = 0
+    em_score = 0
+    total = 0
+
+    def compute_metric_over_ground_truths(metric_fn, pred_answer, ground_truths):
+        if not ground_truths:
+            return [metric_fn(pred_answer, '')]
+
+        scores = []
+        for ground_truth in ground_truths:
+            scores.append(metric_fn(pred_answer, ground_truth))
+
+        return scores
+
+    for qid, pred_answer in answer_dict.items():
+        ground_truths = eval_dict[qid]['answers']
+
+        f1_score += max(compute_metric_over_ground_truths(compute_f1, pred_answer, ground_truths))
+        em_score += max(compute_metric_over_ground_truths(compute_exact, pred_answer, ground_truths))
+
+        total += 1
+
+    return {'EM': 100. * em_score / total,
+            'F1': 100. * f1_score / total}
+
+
+def normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+
+    def remove_articles(text):
+        regex = re.compile(r'\b(a|an|the)\b', re.UNICODE)
+        return re.sub(regex, ' ', text)
+
+    def white_space_fix(text):
+        return ' '.join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+
+def get_tokens(s):
+    if not s: return []
+    return normalize_answer(s).split()
+
+
+def compute_exact(a_gold, a_pred):
+    return int(normalize_answer(a_gold) == normalize_answer(a_pred))
+
+
+def compute_f1(a_gold, a_pred):
+    gold_toks = get_tokens(a_gold)
+    pred_toks = get_tokens(a_pred)
+    common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
+    num_same = sum(common.values())
+    if len(gold_toks) == 0 or len(pred_toks) == 0:
+        # If either is no-answer, then F1 is 1 if they agree, 0 otherwise
+        return int(gold_toks == pred_toks)
+    if num_same == 0:
+        return 0
+    precision = 1.0 * num_same / len(pred_toks)
+    recall = 1.0 * num_same / len(gold_toks)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1

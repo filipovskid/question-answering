@@ -1,16 +1,25 @@
+"""The training process.
+
+Partially adapted from:
+    > https://github.com/chrischute/squad/blob/master/train.py
+"""
+
 import json
 import torch
 import argparse
 import math
+import utils
 
 import numpy as np
+import ujson as json
+from tqdm import tqdm
 import torch.utils.data as data
 import torch.optim as optim
 import torch.nn.functional as F
 
 from datasets import SQuAD
-from tqdm import tqdm
 from models import QANet
+from utils import EMA
 
 
 def parse_args():
@@ -73,13 +82,9 @@ def parse_args():
                         type=int,
                         default=300,
                         help='Dimension of word embedding vector.')
-    parser.add_argument('--use_squad_v2',
-                        type=lambda s: s.lower().startswith('t'),
-                        default=True,
-                        help='Whether to use SQuAD 2.0 (unanswerable) questions.')
     parser.add_argument('--hidden_size',
                         type=int,
-                        default=100,
+                        default=96,
                         help='Number of features in encoder hidden layers.')
     parser.add_argument('--num_visuals',
                         type=int,
@@ -121,7 +126,7 @@ def parse_args():
     parser.add_argument('--metric_name',
                         type=str,
                         default='F1',
-                        choices=('NLL', 'EM', 'F1'),
+                        choices=('loss', 'EM', 'F1'),
                         help='Name of dev metric to determine best checkpoint.')
     parser.add_argument('--max_checkpoints',
                         type=int,
@@ -139,8 +144,19 @@ def parse_args():
                         type=float,
                         default=0.999,
                         help='Decay rate for exponential moving average of parameters.')
+    parser.add_argument('--notebook',
+                        default=False,
+                        action="store_true",
+                        help='Indicate that the training will happen in a notebook.')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.metric_name == 'loss':
+        args.maximize_metric = False
+    elif args.metric_name in ('EM', 'F1'):
+        args.maximize_metric = True
+
+    return args
 
 
 def collate_fn(samples):
@@ -207,7 +223,7 @@ def main(config):
                   char_embeddings=char_embeddings,
                   word_embed_size=config.word_embed_size,
                   char_embed_size=config.char_embed_size,
-                  hidden_size=96,
+                  hidden_size=config.hidden_size,
                   embed_encoder_num_convs=4,
                   embed_encoder_kernel_size=7,
                   embed_encoder_num_heads=4,
@@ -216,7 +232,20 @@ def main(config):
                   model_encoder_kernel_size=5,
                   model_encoder_num_heads=4,
                   model_encoder_num_blocks=7)
+
+    checkpoint_manager = utils.CheckpointManager(config.save_dir,
+                                                 max_checkpoints=config.max_checkpoints,
+                                                 metric_name=config.metric_name,
+                                                 maximize_metric=config.maximize_metric)
+
+    if config.load_path:
+        model, step = checkpoint_manager.load_model(model, config.load_path, device)
+    else:
+        step = 0
+
     model.to(device)
+    model.train()
+    ema = EMA(model.parameters(), decay=config.ema_decay, use_num_updates=True)
 
     optimizer = optim.Adam(model.parameters(), lr=config.base_lr, betas=(0.9, 0.999), eps=1e-08,
                            weight_decay=config.l2_wd)
@@ -227,18 +256,28 @@ def main(config):
     )
 
     train_dataset = SQuAD(config.train_record_file)
-    data_loader = data.DataLoader(train_dataset,
-                                  batch_size=config.batch_size,
-                                  shuffle=False,
-                                  num_workers=config.num_workers,
-                                  collate_fn=collate_fn)
+    train_loader = data.DataLoader(train_dataset,
+                                   batch_size=config.batch_size,
+                                   shuffle=False,
+                                   num_workers=config.num_workers,
+                                   collate_fn=collate_fn)
 
+    dev_dataset = SQuAD(config.dev_record_file)
+    dev_loader = data.DataLoader(dev_dataset,
+                                 batch_size=config.batch_size,
+                                 shuffle=False,
+                                 num_workers=config.num_workers,
+                                 collate_fn=collate_fn)
+
+    steps_till_eval = config.eval_steps
+    epoch = step // len(train_dataset) + 1
     print("Training..")
-    for epoch in range(1, config.num_epochs + 1):
+    for epoch in range(epoch, config.num_epochs + 1):
 
         print(f"Epoch {epoch}/{config.num_epochs}")
-        with tqdm(total=len(data_loader.dataset)) as progress:
-            for context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids in data_loader:
+        with tqdm(total=len(train_dataset)) as progress:
+            for batch_count, (context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids) in \
+                    enumerate(train_loader):
                 batch_size = context_idxs.size()[0]
                 optimizer.zero_grad()
 
@@ -256,9 +295,61 @@ def main(config):
                 torch.nn.utils.clip_grad_value_(model.parameters(), config.max_grad_norm)
                 optimizer.step()
                 scheduler.step()
+                ema.update([param for param in model.parameters() if param.requires_grad])
 
                 progress.update(batch_size)
-                progress.set_postfix(epoch=epoch, loss=loss.item())
+                progress.set_postfix(epoch=epoch, step=step, loss=loss.item())
+
+                step += batch_size
+                steps_till_eval -= batch_size
+                if steps_till_eval <= 0:
+                    steps_till_eval -= batch_size
+
+                    print(f'\nEvaluating at step {step}..')
+                    with ema.average_parameters([param for param in model.parameters() if param.requires_grad]):
+                        metrics, answer_preds = evaluate(model, dev_loader, config.dev_eval_file, device)
+                        checkpoint_manager.save(step, model, metrics[config.metric_name], device)
+
+                    print(f'Step: {step}, loss: {loss:05.2f}, EM: {metrics["EM"]:05.2f}, F1: {metrics["F1"]:05.2f}')
+
+
+def evaluate(model, data_loader, eval_file, device):
+    answer_preds = {}
+    losses = []
+
+    with open(eval_file, 'r') as f:
+        eval_dict = json.load(f)
+
+    model.eval()
+    with torch.no_grad(), tqdm(position=0, total=len(data_loader.dataset)) as progress:
+        for step, (context_idxs, context_char_idxs, question_idxs, question_char_idxs, y1, y2, ids) in \
+                enumerate(data_loader):
+            batch_size = context_idxs.size()[0]
+
+            context_idxs = context_idxs.to(device)
+            context_char_idxs = context_char_idxs.to(device)
+            question_idxs = question_idxs.to(device)
+            question_char_idxs = question_char_idxs.to(device)
+
+            y1, y2 = y1.to(device), y2.to(device)
+            log_p1, log_p2 = model(context_idxs, context_char_idxs, question_idxs, question_char_idxs)
+            loss = F.nll_loss(log_p1, y1) + F.nll_loss(log_p2, y2)
+            losses.append(loss.item())
+
+            p1, p2 = log_p1.exp(), log_p2.exp()
+            start_idxs, end_idxs = utils.infer_span(p_start=p1, p_end=p2)
+
+            progress.update(batch_size)
+            progress.set_postfix(step=step, loss=loss.item())
+
+            answer_preds_, _ = utils.convert_tokens(eval_dict, ids.tolist(), start_idxs.tolist(), end_idxs.tolist())
+            answer_preds.update(answer_preds_)
+
+    model.train()
+    metrics = utils.compute_metrics(eval_dict, answer_preds)
+    metrics['loss'] = np.mean(losses)
+
+    return metrics, answer_preds
 
 
 if __name__ == '__main__':
