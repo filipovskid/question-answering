@@ -73,8 +73,16 @@ class CharEmbedding(nn.Module):
     def __init__(self, char_embeddings, char_embed_size, hidden_size):
         super(CharEmbedding, self).__init__()
 
-        self.char_embedding = nn.Embedding.from_pretrained(char_embeddings, freeze=False)
+        if char_embeddings.size()[1] != char_embed_size:
+            char_embeddings = torch.Tensor(char_embeddings.size()[0], char_embed_size)
+            nn.init.normal_(char_embeddings)
+            char_embeddings[0].fill_(0)
+            char_embeddings[1].fill_(0)
+            self.char_embedding = nn.Embedding.from_pretrained(char_embeddings, freeze=False, padding_idx=0)
+        else:
+            self.char_embedding = nn.Embedding.from_pretrained(char_embeddings, freeze=False)
 
+        print(self.char_embedding)
         self.conv2d = nn.Conv2d(char_embed_size, hidden_size, kernel_size=(1, 5), padding=0, bias=True)
         nn.init.kaiming_normal_(self.conv2d.weight, nonlinearity='relu')
 
