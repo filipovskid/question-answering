@@ -37,7 +37,7 @@ class Embedding(nn.Module):
     def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size, hidden_size):
         super(Embedding, self).__init__()
 
-        self.word_embeddings = nn.Embedding.from_pretrained(word_embeddings)
+        self.word_embeddings = nn.Embedding.from_pretrained(word_embeddings, freeze=True)
         self.char_embedding = CharEmbedding(char_embeddings, char_embed_size, hidden_size)
         self.highway = HighwayNetwork(2, hidden_size)
 
