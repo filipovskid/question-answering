@@ -447,7 +447,6 @@ def infer_span(p_start, p_end):
         p_end:  torch.Tensor of size (batch_size, context_len). Probabilities for
         each token being an ending position.
     """
-    context_len = p_start.size(1)
 
     # Broadcasted size (batch_size, context_len, context_len)
     p_joint = torch.matmul(p_start.unsqueeze(2), p_end.unsqueeze(1))
@@ -456,7 +455,7 @@ def infer_span(p_start, p_end):
     p_joint = torch.triu(p_joint)
 
     # Joint probability start and end to be the 0th token. This is used as no answer.
-    p_no_answer = p_joint[:, 0, 0]
+    p_no_answer = p_joint[:, 0, 0].clone()
     p_joint[:, 0, :] = 0
     p_joint[:, :, 0] = 0
 
