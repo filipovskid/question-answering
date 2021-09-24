@@ -215,7 +215,7 @@ def torch_from_json(path, dtype=torch.float32):
 
 
 def main(config):
-    print(f'Config: ', json.dumps(config, sort_keys=True, indent=4))
+    print(f'Config: ', json.dumps(vars(config), sort_keys=True, indent=4))
     word_embeddings = torch_from_json(config.word_emb_file)
     char_embeddings = torch_from_json(config.char_emb_file)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
