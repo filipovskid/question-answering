@@ -136,7 +136,7 @@ class EncoderBlock(nn.Module):
         self.num_convs = num_convs
         self.layers_per_block = num_convs + 1
         self.L = self.layers_per_block * num_blocks  # Total # of layers
-        self.l = float(self.layers_per_block * block_index + 1)
+        self.block_sublayer_no = float(self.layers_per_block * block_index + 1)
 
         # Layers within residual blocks containing depthwise separable convolution
         self.conv_layernorms = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_convs)])
@@ -160,6 +160,8 @@ class EncoderBlock(nn.Module):
 
             :returns: torch.Tensor of size (batch_size, d, num_words)
         """
+        l = self.block_sublayer_no
+
         x = PositionEncoder(x)
 
         # First num_convolution residual blocks
@@ -171,25 +173,25 @@ class EncoderBlock(nn.Module):
                 x = F.dropout(x, p=0.1, training=self.training)
 
             x = depthwise_conv(x)
-            x = self.layer_dropout(x, residual, dropout=0.1 * self.l / self.L)
+            x = self.layer_dropout(x, residual, dropout=0.1 * l / self.L)
 
-            self.l += 1
+            l += 1
 
         # Self-attention residual block
         residual = x
         x = self.attention_layernorm(x.transpose(1, 2)).transpose(1, 2)
         x = F.dropout(x, p=0.1, training=self.training)
         x = self.attention(x, padding_mask)
-        x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
+        x = self.layer_dropout(x, residual, 0.1 * l / self.L)
 
-        self.l += 1
+        l += 1
 
         # Feedforward residual block
         residual = x
         x = self.feedforward_layernorm(x.transpose(1, 2)).transpose(1, 2)
         x = F.dropout(x, p=0.1, training=self.training)
         x = self.feedforward(x)
-        x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
+        x = self.layer_dropout(x, residual, 0.1 * l / self.L)
 
         return x
 
