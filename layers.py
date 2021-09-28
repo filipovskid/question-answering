@@ -149,7 +149,7 @@ class EncoderBlock(nn.Module):
 
         # Layers within residual block containing Feedforward layer
         self.feedforward_layernorm = nn.LayerNorm(hidden_size)
-        self.feedforward = FeedForward(hidden_size)
+        self.feedforward = LinearFeedForward(hidden_size)
 
     def forward(self, x, padding_mask):
         """
@@ -190,7 +190,7 @@ class EncoderBlock(nn.Module):
         residual = x
         x = self.feedforward_layernorm(x.transpose(1, 2)).transpose(1, 2)
         x = F.dropout(x, p=0.1, training=self.training)
-        x = self.feedforward(x)
+        x = self.feedforward(x.transpose(1, 2)).transpose(1, 2)
         x = self.layer_dropout(x, residual, 0.1 * l / self.L)
 
         return x
@@ -290,6 +290,27 @@ class FeedForward(nn.Module):
         """
         x = self.non_linear_conv(x)
         x = self.linear_conv(x)
+
+        return x
+
+
+class LinearFeedForward(nn.Module):
+
+    def __init__(self, hidden_size):
+        super(LinearFeedForward, self).__init__()
+
+        self.non_linear = nn.Linear(hidden_size, hidden_size)
+        self.linear = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, x):
+        """
+        Parameters:
+            x:
+            :returns: torch.Tensor of size (batch_size, hidden_size, num_words)
+        """
+        x = self.non_linear(x)
+        x = F.relu(x)
+        x = self.linear(x)
 
         return x
 
