@@ -82,7 +82,6 @@ class CharEmbedding(nn.Module):
         else:
             self.char_embedding = nn.Embedding.from_pretrained(char_embeddings, freeze=False)
 
-        print(self.char_embedding)
         self.conv2d = nn.Conv2d(char_embed_size, hidden_size, kernel_size=(1, 5), padding=0, bias=True)
         nn.init.kaiming_normal_(self.conv2d.weight, nonlinearity='relu')
 
@@ -161,50 +160,36 @@ class EncoderBlock(nn.Module):
 
             :returns: torch.Tensor of size (batch_size, d, num_words)
         """
-        # print('input:', x.size())
         x = PositionEncoder(x)
 
-        # print('PositionEncoder:', x.size())
-        # print('---- Residual block ----')
         # First num_convolution residual blocks
         for i, (depthwise_conv, layernorm) in enumerate(zip(self.depthwise_convs, self.conv_layernorms)):
             residual = x
             x = layernorm(x.transpose(1, 2)).transpose(1, 2)
-            # print('depthwise_layernorm:', x.size())
 
             if i % 2 == 0:
                 x = F.dropout(x, p=0.1, training=self.training)
 
             x = depthwise_conv(x)
-            # print('depthwise:', x.size())
             x = self.layer_dropout(x, residual, dropout=0.1 * self.l / self.L)
-            # print('layer_dropout:', x.size())
 
             self.l += 1
 
-        # print('---- Residual block ----')
         # Self-attention residual block
         residual = x
         x = self.attention_layernorm(x.transpose(1, 2)).transpose(1, 2)
-        # print('attention_layernorm:', x.size())
         x = F.dropout(x, p=0.1, training=self.training)
-        # print('att_dropout:', x.size())
         x = self.attention(x, padding_mask)
-        # print('attention:', x.size())
         x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
-        # print('attention layer_dropout:', x.size())
 
         self.l += 1
 
-        # print('---- Residual block ----')
+        # Feedforward residual block
         residual = x
         x = self.feedforward_layernorm(x.transpose(1, 2)).transpose(1, 2)
-        # print('feedforward layernorm:', x.size())
         x = F.dropout(x, p=0.1, training=self.training)
         x = self.feedforward(x)
-        # print('feedforward:', x.size())
         x = self.layer_dropout(x, residual, 0.1 * self.l / self.L)
-        # print('feedforward layer_dropout:', x.size())
 
         return x
 
