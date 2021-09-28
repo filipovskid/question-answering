@@ -121,7 +121,7 @@ class HighwayNetwork(nn.Module):
             g = torch.sigmoid(gate(x))
             # t = F.relu(transform(x))
             t = transform(x)
-            t = F.dropout(x, p=0.1)
+            t = F.dropout(x, p=0.1, training=self.training)
             x = g * t + (1 - g) * x
 
         return x
