@@ -76,16 +76,12 @@ def parse_args():
                                   multiple GPUs are available.')
     parser.add_argument('--char_embed_size',
                         type=int,
-                        default=64,
+                        default=100,
                         help='Dimension of character embedding vector.')
     parser.add_argument('--word_embed_size',
                         type=int,
                         default=300,
                         help='Dimension of word embedding vector.')
-    parser.add_argument('--hidden_size',
-                        type=int,
-                        default=96,
-                        help='Number of features in encoder hidden layers.')
     parser.add_argument('--num_visuals',
                         type=int,
                         default=10,
@@ -113,7 +109,7 @@ def parse_args():
                         help='Number of warming up steps.')
     parser.add_argument('--l2_wd',
                         type=float,
-                        default=5e-8,
+                        default=3e-7,
                         help='L2 weight decay.')
     parser.add_argument('--num_epochs',
                         type=int,
@@ -142,12 +138,48 @@ def parse_args():
                         help='Random seed for reproducibility.')
     parser.add_argument('--ema_decay',
                         type=float,
-                        default=0.999,
+                        default=0.9999,
                         help='Decay rate for exponential moving average of parameters.')
     parser.add_argument('--notebook',
                         default=False,
                         action="store_true",
                         help='Indicate that the training will happen in a notebook.')
+    parser.add_argument('--hidden_size',
+                        type=int,
+                        default=128,
+                        help='Number of features in encoder hidden layers.')
+    parser.add_argument('--embed_encoder_num_convs',
+                        type=int,
+                        default=4,
+                        help='Number of convolution sublayers in each embedding encoder layer.')
+    parser.add_argument('--embed_encoder_kernel_size',
+                        type=int,
+                        default=7,
+                        help='Kernel size of each convolution sublayer in each embedding encoder layer.')
+    parser.add_argument('--embed_encoder_num_heads',
+                        type=int,
+                        default=8,
+                        help='Number of attention heads in each encoder block in the embedding encoder layer.')
+    parser.add_argument('--embed_encoder_num_blocks',
+                        type=int,
+                        default=1,
+                        help='Number of encoder blocks in each embedding encoder layer.')
+    parser.add_argument('--model_encoder_num_convs',
+                        type=int,
+                        default=2,
+                        help='Number of convolution sublayers in each model encoder layer.')
+    parser.add_argument('--model_encoder_kernel_size',
+                        type=int,
+                        default=7,
+                        help='Kernel size of each convolution sublayer in each model encoder layer.')
+    parser.add_argument('--model_encoder_num_heads',
+                        type=int,
+                        default=8,
+                        help='Number of attention heads in each encoder block in the model encoder layer.')
+    parser.add_argument('--model_encoder_num_blocks',
+                        type=int,
+                        default=7,
+                        help='Number of encoder blocks in each model encoder layer.')
 
     args = parser.parse_args()
 
@@ -225,14 +257,14 @@ def main(config):
                   word_embed_size=config.word_embed_size,
                   char_embed_size=config.char_embed_size,
                   hidden_size=config.hidden_size,
-                  embed_encoder_num_convs=4,
-                  embed_encoder_kernel_size=7,
-                  embed_encoder_num_heads=4,
-                  embed_encoder_num_blocks=1,
-                  model_encoder_num_convs=2,
-                  model_encoder_kernel_size=5,
-                  model_encoder_num_heads=4,
-                  model_encoder_num_blocks=7)
+                  embed_encoder_num_convs=config.embed_encoder_num_convs,
+                  embed_encoder_kernel_size=config.embed_encoder_kernel_size,
+                  embed_encoder_num_heads=config.embed_encoder_num_heads,
+                  embed_encoder_num_blocks=config.embed_encoder_num_blocks,
+                  model_encoder_num_convs=config.model_encoder_num_convs,
+                  model_encoder_kernel_size=config.model_encoder_kernel_size,
+                  model_encoder_num_heads=config.model_encoder_num_heads,
+                  model_encoder_num_blocks=config.model_encoder_num_blocks)
 
     checkpoint_manager = utils.CheckpointManager(config.save_dir,
                                                  max_checkpoints=config.max_checkpoints,
@@ -248,7 +280,7 @@ def main(config):
     model.train()
     ema = EMA(model.parameters(), decay=config.ema_decay, use_num_updates=True)
 
-    optimizer = optim.Adam(model.parameters(), lr=config.base_lr, betas=(0.9, 0.999), eps=1e-08,
+    optimizer = optim.Adam(model.parameters(), lr=config.base_lr, betas=(0.8, 0.999), eps=1e-07,
                            weight_decay=config.l2_wd)
     cr = config.lr / math.log2(config.num_warmup_steps)
     scheduler = optim.lr_scheduler.LambdaLR(
