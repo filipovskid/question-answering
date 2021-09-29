@@ -71,7 +71,7 @@ def parse_args():
                         help='Base directory for saving information.')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=64,
+                        default=32,
                         help='Batch size per GPU. Scales automatically when \
                                   multiple GPUs are available.')
     parser.add_argument('--char_embed_size',
@@ -170,7 +170,7 @@ def parse_args():
                         help='Number of convolution sublayers in each model encoder layer.')
     parser.add_argument('--model_encoder_kernel_size',
                         type=int,
-                        default=7,
+                        default=5,
                         help='Kernel size of each convolution sublayer in each model encoder layer.')
     parser.add_argument('--model_encoder_num_heads',
                         type=int,
