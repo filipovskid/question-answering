@@ -338,12 +338,12 @@ def main(config):
                 if steps_till_eval <= 0:
                     steps_till_eval = config.eval_steps
 
-                    print(f'\nEvaluating at step {step}..')
+                    print(f'\n\nEvaluating at step {step}..')
                     with ema.average_parameters([param for param in model.parameters() if param.requires_grad]):
                         metrics, answer_preds = evaluate(model, dev_loader, config.dev_eval_file, device)
                         checkpoint_manager.save(step, model, metrics[config.metric_name], device)
 
-                    print(f'Step: {step}, loss: {loss:05.2f}, EM: {metrics["EM"]:05.2f}, F1: {metrics["F1"]:05.2f}')
+                    print(f'Step: {step}, loss: {loss:05.2f}, EM: {metrics["EM"]:05.2f}, F1: {metrics["F1"]:05.2f}\n')
 
 
 def evaluate(model, data_loader, eval_file, device):
