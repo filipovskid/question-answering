@@ -434,7 +434,7 @@ def masked_softmax(logits, mask, dim=-1, log_softmax=False):
     return probs
 
 
-def infer_span(p_start, p_end):
+def infer_span(p_start, p_end, max_len=None):
     """Infer the start and end indices of an answer given probabilities of
     the starting and ending positions. The predicted span (i, j) is
     chosen such that:
@@ -446,24 +446,30 @@ def infer_span(p_start, p_end):
         each token being a starting position.
         p_end:  torch.Tensor of size (batch_size, context_len). Probabilities for
         each token being an ending position.
+        max_len: If the answer is bounded this sets the maximum answer length.
     """
+    context_len = p_start.size()[1]
 
     # Broadcasted size (batch_size, context_len, context_len)
     p_joint = torch.matmul(p_start.unsqueeze(2), p_end.unsqueeze(1))
 
     # Retain only values where start <= end
-    p_joint = torch.triu(p_joint)
+    span_mask = torch.triu(torch.ones((context_len, context_len), device=p_start.device))
+
+    if max_len:
+        span_mask -= torch.triu(torch.ones((context_len, context_len), device=p_start.device), diagonal=max_len)
 
     # Joint probability start and end to be the 0th token. This is used as no answer.
     p_no_answer = p_joint[:, 0, 0].clone()
     p_joint[:, 0, :] = 0
     p_joint[:, :, 0] = 0
+    p_joint *= span_mask
 
     # Find (i, j) that maximize p_start[i] * p_end[i]
     row_max, _ = torch.max(p_joint, dim=2)
     col_max, _ = torch.max(p_joint, dim=1)
     start_idxs = torch.argmax(row_max, dim=1)
-    end_idxs = torch.argmax(row_max, dim=1)
+    end_idxs = torch.argmax(col_max, dim=1)
 
     # If probability of not having an answer is greater than the joint probability
     # of having an answer, then the query has no answer.

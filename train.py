@@ -23,6 +23,9 @@ from models import QANet
 from utils import EMA
 
 
+# indices = torch.arange(1000)
+# dev_dataset = data_utils.Subset(dev_dataset, indices)
+
 def parse_args():
     """Training arguments"""
 
@@ -181,6 +184,10 @@ def parse_args():
                         type=int,
                         default=7,
                         help='Number of encoder blocks in each model encoder layer.')
+    parser.add_argument('--inference_len',
+                        type=int,
+                        default=None,
+                        help='Bounded inference answer length. If None, no bounding is used.')
 
     args = parser.parse_args()
 
@@ -342,14 +349,15 @@ def main(config):
                     print(f'\n\nEvaluating at step {step}..')
                     sys.stdout.flush()
                     with ema.average_parameters([param for param in model.parameters() if param.requires_grad]):
-                        metrics, answer_preds = evaluate(model, dev_loader, config.dev_eval_file, device)
+                        metrics, answer_preds = evaluate(model, dev_loader, config.dev_eval_file, config.inference_len,
+                                                         device)
                         checkpoint_manager.save(step, model, metrics[config.metric_name], device)
 
                     print(f'Step: {step}, loss: {loss:05.2f}, EM: {metrics["EM"]:05.2f}, F1: {metrics["F1"]:05.2f}\n')
                     sys.stdout.flush()
 
 
-def evaluate(model, data_loader, eval_file, device):
+def evaluate(model, data_loader, eval_file, inference_len, device):
     answer_preds = {}
     losses = []
 
@@ -373,7 +381,7 @@ def evaluate(model, data_loader, eval_file, device):
             losses.append(loss.item())
 
             p1, p2 = log_p1.exp(), log_p2.exp()
-            start_idxs, end_idxs = utils.infer_span(p_start=p1, p_end=p2)
+            start_idxs, end_idxs = utils.infer_span(p_start=p1, p_end=p2, max_len=inference_len)
 
             progress.update(batch_size)
             progress.set_postfix(step=step, loss=loss.item())
