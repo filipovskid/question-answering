@@ -97,7 +97,7 @@ class CharEmbedding(nn.Module):
         x = self.char_embedding(char_idxs)
         x = x.permute(0, 3, 1, 2)
 
-        # Size: (batch_size, hidden_size, max_word_len, 12)
+        # Size: (batch_size, hidden_size, num_words, 12)
         x = self.conv2d(x)
         x = F.relu(x)
         x, _ = torch.max(x, dim=3)
