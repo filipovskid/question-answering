@@ -19,7 +19,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 from datasets import SQuAD
-from models import QANet
+from models import QANet, ConditionalQANet
 from utils import EMA
 
 
@@ -188,6 +188,10 @@ def parse_args():
                         type=int,
                         default=None,
                         help='Bounded inference answer length. If None, no bounding is used.')
+    parser.add_argument('--model',
+                        choices=['qanet', 'conditional-qanet'],
+                        default='qanet',
+                        help='Model for training.')
 
     args = parser.parse_args()
 
@@ -254,13 +258,23 @@ def torch_from_json(path, dtype=torch.float32):
     return tensor
 
 
-def main(config):
-    print(f'Config: ', json.dumps(vars(config), sort_keys=True, indent=4))
-    word_embeddings = torch_from_json(config.word_emb_file)
-    char_embeddings = torch_from_json(config.char_emb_file)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+def get_model(config, word_embeddings, char_embeddings, model):
+    models = {
+        'qanet': QANet(word_embeddings=word_embeddings,
+                  char_embeddings=char_embeddings,
+                  word_embed_size=config.word_embed_size,
+                  char_embed_size=config.char_embed_size,
+                  hidden_size=config.hidden_size,
+                  embed_encoder_num_convs=config.embed_encoder_num_convs,
+                  embed_encoder_kernel_size=config.embed_encoder_kernel_size,
+                  embed_encoder_num_heads=config.embed_encoder_num_heads,
+                  embed_encoder_num_blocks=config.embed_encoder_num_blocks,
+                  model_encoder_num_convs=config.model_encoder_num_convs,
+                  model_encoder_kernel_size=config.model_encoder_kernel_size,
+                  model_encoder_num_heads=config.model_encoder_num_heads,
+                  model_encoder_num_blocks=config.model_encoder_num_blocks),
 
-    model = QANet(word_embeddings=word_embeddings,
+        'conditional-qanet': ConditionalQANet(word_embeddings=word_embeddings,
                   char_embeddings=char_embeddings,
                   word_embed_size=config.word_embed_size,
                   char_embed_size=config.char_embed_size,
@@ -273,6 +287,18 @@ def main(config):
                   model_encoder_kernel_size=config.model_encoder_kernel_size,
                   model_encoder_num_heads=config.model_encoder_num_heads,
                   model_encoder_num_blocks=config.model_encoder_num_blocks)
+    }
+
+    return models[model]
+
+
+def main(config):
+    print(f'Config: ', json.dumps(vars(config), sort_keys=True, indent=4))
+    word_embeddings = torch_from_json(config.word_emb_file)
+    char_embeddings = torch_from_json(config.char_emb_file)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    model = get_model(config, word_embeddings, char_embeddings, config.model)
 
     checkpoint_manager = utils.CheckpointManager(config.save_dir,
                                                  max_checkpoints=config.max_checkpoints,
