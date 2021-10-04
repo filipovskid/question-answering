@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from layers import Embedding, EncoderLayer, ContextQueryAttention, InitializedConv1d, QuestionAnsweringOutput, \
-    ConditionedQuestionAnsweringOutput
+    ConditionalQuestionAnsweringOutput
 
 
 class QANet(nn.Module):
@@ -56,13 +56,13 @@ class QANet(nn.Module):
         return y1, y2
 
 
-class ConditionedQANet(nn.Module):
+class ConditionalQANet(nn.Module):
 
     def __init__(self, word_embeddings, char_embeddings, word_embed_size, char_embed_size, hidden_size,
                  embed_encoder_num_convs, embed_encoder_kernel_size, embed_encoder_num_heads,
                  embed_encoder_num_blocks, model_encoder_num_convs, model_encoder_kernel_size,
                  model_encoder_num_heads, model_encoder_num_blocks):
-        super(ConditionedQANet, self).__init__()
+        super(ConditionalQANet, self).__init__()
 
         self.embedding = Embedding(word_embeddings=word_embeddings,
                                    char_embeddings=char_embeddings,
@@ -81,7 +81,7 @@ class ConditionedQANet(nn.Module):
                                           kernel_size=model_encoder_kernel_size,
                                           num_heads=model_encoder_num_heads,
                                           num_blocks=model_encoder_num_blocks)
-        self.output = ConditionedQuestionAnsweringOutput(hidden_size)
+        self.output = ConditionalQuestionAnsweringOutput(hidden_size)
 
     def forward(self, context_idxs, context_char_idxs, query_idxs, query_char_idxs):
         context_padding_mask = torch.zeros_like(context_idxs) == context_idxs

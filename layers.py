@@ -407,10 +407,10 @@ class QuestionAnsweringOutput(nn.Module):
         return y1, y2
 
 
-class ConditionedQuestionAnsweringOutput(nn.Module):
+class ConditionalQuestionAnsweringOutput(nn.Module):
 
     def __init__(self, hidden_size):
-        super(ConditionedQuestionAnsweringOutput, self).__init__()
+        super(ConditionalQuestionAnsweringOutput, self).__init__()
 
         self.linear_w1 = InitializedConv1d(hidden_size * 2, 1)
         self.linear_w2 = InitializedConv1d(hidden_size * 2, 1)
