@@ -412,17 +412,26 @@ class ConditionalQuestionAnsweringOutput(nn.Module):
     def __init__(self, hidden_size):
         super(ConditionalQuestionAnsweringOutput, self).__init__()
 
-        self.linear_w1 = InitializedConv1d(hidden_size * 2, 1)
-        self.linear_w2 = InitializedConv1d(hidden_size * 2, 1)
+        self.linear_start = InitializedConv1d(hidden_size * 2, 1)
+        self.linear_end = InitializedConv1d(hidden_size * 2, 1)
+
+        self.end_encoder = InitializedConv1d(hidden_size * 2, hidden_size)
+        self.start_encoder = InitializedConv1d(hidden_size, hidden_size)
 
     def forward(self, M0, M1, M2, key_padding_mask):
         concat_start = torch.cat([M0, M1], dim=1)
         concat_end = torch.cat([M0, M2], dim=1)
 
-        linear_start = self.linear_w1(concat_start)
-        linear_end = self.linear_w2(concat_end)
+        start_out = self.linear_start(concat_start)
 
-        y1 = masked_softmax(linear_start.squeeze(), key_padding_mask, log_softmax=True)
-        y2 = masked_softmax(linear_end.squeeze(), key_padding_mask, log_softmax=True)
+        start_info = M0 * start_out
+        # start_info = torch.matmul(M0, start_out.view(start_out.size(0), -1))
+        encoded_start = self.start_encoder(start_info)
+        encoded_end = self.end_encoder(concat_end)
+        end_info = torch.cat([encoded_end, encoded_start], dim=1)
+        end_out = self.linear_end(end_info)
+
+        y1 = masked_softmax(start_out.squeeze(), key_padding_mask, log_softmax=True)
+        y2 = masked_softmax(end_out.squeeze(), key_padding_mask, log_softmax=True)
 
         return y1, y2
